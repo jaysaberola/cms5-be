@@ -16,7 +16,7 @@ class AboutPageGrapesSeeder extends Seeder
 
         $payload = [
             'parent_page_id' => null,
-            'album_id' => null,
+            'album_id' => 2,
             'name' => 'About',
             'label' => 'About Us',
             'contents' => '',

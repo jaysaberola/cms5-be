@@ -1,0 +1,110 @@
+<div id="wf-contact" class="exec-tpl exec-contact">
+  <header class="exec-contact-hero exec-reveal">
+    <div class="exec-contact-hero-glow" aria-hidden="true"></div>
+    <div class="exec-contact-hero-inner">
+      <span class="exec-eyebrow">Contact</span>
+      <h1 class="exec-h2">Book a call or send a message</h1>
+      <p class="exec-lead">Tell us about your goals—whether you need hosting, a new site, or a long-term partner. We typically respond within one business day.</p>
+    </div>
+  </header>
+
+  <section class="exec-section" style="padding-top: clamp(2rem, 5vw, 3rem);">
+    <div class="exec-container exec-contact-layout">
+      <aside class="exec-contact-stack exec-reveal">
+        <div class="exec-card">
+          <h3>Visit us</h3>
+          <div class="exec-contact-info">
+            <span class="exec-contact-info-icon" aria-hidden="true">📍</span>
+            <div>
+              <span class="exec-contact-info-label">Office</span>
+              <p>Unit 907-909, Antel Global Corporate Center,<br />Julia Vargas Ave., Ortigas Center, Pasig City</p>
+            </div>
+          </div>
+        </div>
+        <div class="exec-card">
+          <h3>Direct lines</h3>
+          <div class="exec-contact-info" style="margin-bottom: 1rem;">
+            <span class="exec-contact-info-icon" aria-hidden="true">☎</span>
+            <div>
+              <span class="exec-contact-info-label">Phone</span>
+              <p><a href="tel:+63287065796">+63 (2) 8706-5796</a></p>
+            </div>
+          </div>
+          <div class="exec-contact-info">
+            <span class="exec-contact-info-icon" aria-hidden="true">✉</span>
+            <div>
+              <span class="exec-contact-info-label">Email</span>
+              <p><a href="mailto:customercare@webfocus.ph">customercare@webfocus.ph</a></p>
+            </div>
+          </div>
+        </div>
+        <div class="exec-contact-hours">
+          <strong>Business hours</strong>
+          <p>Monday – Friday, 8:00 AM – 5:00 PM (Philippine Standard Time)</p>
+        </div>
+        <div class="exec-contact-map exec-card" style="padding: 0;">
+          <iframe title="WebFocus office location" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="https://www.google.com/maps?q=Antel+Global+Corporate+Center+Julia+Vargas+Avenue+Ortigas+Center+Pasig+City&amp;t=&amp;z=15&amp;ie=UTF8&amp;iwloc=&amp;output=embed"></iframe>
+        </div>
+      </aside>
+
+      <div class="exec-contact-form-panel exec-reveal">
+        <form data-cms-contact-form="1" class="cms-wsi-contact-form" novalidate>
+          <h2 class="exec-form-title">Send a message</h2>
+          <p class="exec-form-hint">Fields marked with * are required. Your inquiry goes straight to our customer care team.</p>
+          <div data-cms-contact-alert class="exec-contact-alert"></div>
+
+          <div class="exec-field exec-field--full">
+            <label class="exec-label" for="cms_inquiry_type">Inquiry type <span class="exec-label-required">*</span></label>
+            <select id="cms_inquiry_type" name="inquiry_type" required>
+              <option value="">Select inquiry type</option>
+              <option value="General Inquiry">General Inquiry</option>
+              <option value="Customer Support">Customer Support</option>
+              <option value="Business Partnership">Business Partnership</option>
+              <option value="Careers">Careers</option>
+            </select>
+          </div>
+
+          <div class="exec-form-grid">
+            <div class="exec-field">
+              <label class="exec-label" for="cms_first_name">First name <span class="exec-label-required">*</span></label>
+              <input id="cms_first_name" name="first_name" type="text" required autocomplete="given-name" class="exec-input" />
+            </div>
+            <div class="exec-field">
+              <label class="exec-label" for="cms_last_name">Last name <span class="exec-label-required">*</span></label>
+              <input id="cms_last_name" name="last_name" type="text" required autocomplete="family-name" class="exec-input" />
+            </div>
+            <div class="exec-field">
+              <label class="exec-label" for="cms_email">Email <span class="exec-label-required">*</span></label>
+              <input id="cms_email" name="email" type="email" required autocomplete="email" class="exec-input" />
+            </div>
+            <div class="exec-field">
+              <label class="exec-label" for="cms_contact_number">Mobile <span class="exec-label-required">*</span></label>
+              <input id="cms_contact_number" name="contact_number" type="tel" inputmode="numeric" autocomplete="tel" placeholder="e.g. 09171234567" required class="exec-input" data-cms-ph-mobile="1" />
+              <div data-cms-contact-phone-error style="display:none;margin-top:6px;font-size:12px;color:#ffb4a0;"></div>
+            </div>
+          </div>
+
+          <div class="exec-field exec-field--full">
+            <label class="exec-label" for="cms_message">Message <span class="exec-label-required">*</span></label>
+            <textarea id="cms_message" name="message" rows="5" required class="exec-input"></textarea>
+          </div>
+
+          <div class="exec-field exec-field--full" data-cms-contact-preferred-services="1">
+            <span class="exec-label">Preferred services <span style="font-weight:500;color:var(--exec-muted)">(optional)</span></span>
+            <div class="exec-preferred-grid">
+              <label><input type="checkbox" name="preferred_services" value="Hosting" data-cms-preferred-service="1" /> Hosting</label>
+              <label><input type="checkbox" name="preferred_services" value="Web Design" data-cms-preferred-service="1" /> Web Design</label>
+              <label><input type="checkbox" name="preferred_services" value="Domains" data-cms-preferred-service="1" /> Domains</label>
+              <label><input type="checkbox" name="preferred_services" value="DMS" data-cms-preferred-service="1" /> DMS</label>
+              <label><input type="checkbox" name="preferred_services" value="SSL / Security" data-cms-preferred-service="1" /> SSL / Security</label>
+              <label><input type="checkbox" name="preferred_services" value="Other" data-cms-preferred-service="1" /> Other</label>
+            </div>
+          </div>
+
+          <div class="exec-contact-recaptcha" data-cms-contact-recaptcha="1"></div>
+          <button type="submit" data-cms-contact-submit="1" class="exec-btn exec-btn--primary exec-btn--no-arrow">Send message</button>
+        </form>
+      </div>
+    </div>
+  </section>
+</div>

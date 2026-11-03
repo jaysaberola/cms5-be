@@ -1,6 +1,4 @@
 (function () {
-  var yearEl = document.getElementById("wsi-footer-year");
-  if (yearEl) {
-    yearEl.textContent = String(new Date().getFullYear());
-  }
+  var y = document.getElementById("wf-footer-year");
+  if (y) y.textContent = String(new Date().getFullYear());
 })();

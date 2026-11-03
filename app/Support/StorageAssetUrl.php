@@ -10,7 +10,13 @@ class StorageAssetUrl
             return null;
         }
 
-        $normalized = ltrim(str_replace('\\', '/', (string) $path), '/');
+        $normalized = trim(str_replace('\\', '/', (string) $path));
+
+        if (preg_match('#^https?://#i', $normalized)) {
+            return $normalized;
+        }
+
+        $normalized = ltrim($normalized, '/');
 
         return '/storage/' . $normalized;
     }
