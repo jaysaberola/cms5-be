@@ -1,0 +1,215 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\Page;
+use App\Models\Setting;
+use App\Models\SocialMediaAccount;
+use App\Support\PhMobile;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+
+class WebsiteSettingController extends Controller
+{
+    private function setting()
+    {
+        return Setting::firstOrFail();
+    }
+
+    /* =========================
+       GET SETTINGS
+    ========================= */
+    public function show()
+    {
+        $dataPrivacy = Page::firstOrCreate(
+            ['slug' => 'data-privacy'],
+            [
+                'name' => 'Privacy Policy',
+                'label' => 'Privacy Policy',
+                'contents' => '',
+                'content_type' => 'grapes',
+                'status' => 'published',
+                'page_type' => 'default',
+                'user_id' => 1,
+            ]
+        );
+
+        return response()->json([
+            'setting' => $this->setting(),
+            'data_privacy' => $dataPrivacy,
+        ]);
+    }
+
+    public function publicBranding()
+    {
+        $setting = Setting::query()->select([
+            'website_name',
+            'company_name',
+            'company_logo',
+            'website_favicon',
+            'google_recaptcha_sitekey',
+        ])->first();
+
+        return response()->json([
+            'website_name' => $setting?->website_name,
+            'company_name' => $setting?->company_name,
+            'company_logo' => $setting?->company_logo,
+            'website_favicon' => $setting?->website_favicon,
+            'google_recaptcha_sitekey' => $setting?->google_recaptcha_sitekey,
+        ]);
+    }
+
+    /* =========================
+       WEBSITE TAB
+    ========================= */
+    public function updateWebsite(Request $request)
+    {
+        $request->validate([
+            'company_name' => 'required|string|max:150',
+            'website_name' => 'required|string|max:150',
+            'copyright' => 'required|string|max:150',
+            'company_logo' => 'nullable|image',
+            'website_favicon' => 'nullable|image',
+            'nav_alignment' => 'nullable|in:left,center,right',
+        ]);
+
+        $setting = $this->setting();
+
+        if ($request->hasFile('company_logo')) {
+            if ($setting->company_logo) {
+                Storage::disk('public')->delete($setting->company_logo);
+            }
+            $setting->company_logo = $request->file('company_logo')
+                ->store('logos', 'public');
+        }
+
+        if ($request->hasFile('website_favicon')) {
+            if ($setting->website_favicon) {
+                Storage::disk('public')->delete($setting->website_favicon);
+            }
+            $setting->website_favicon = $request->file('website_favicon')
+                ->store('icons', 'public');
+        }
+
+        $setting->update($request->only([
+            'company_name',
+            'website_name',
+            'copyright',
+            'google_analytics',
+            'google_map',
+            'google_recaptcha_sitekey',
+            'google_recaptcha_secret',
+            'nav_alignment',
+        ]));
+
+        return response()->json(['message' => 'Website settings updated']);
+    }
+
+    /* =========================
+       CONTACT TAB
+    ========================= */
+    public function updateContact(Request $request)
+    {
+        $request->validate([
+            'company_address' => 'required',
+            'mobile_no' => PhMobile::rule(true),
+            'tel_no' => 'required',
+            'email' => 'required|email',
+        ]);
+
+        $this->setting()->update([
+            'company_address' => $request->input('company_address'),
+            'mobile_no' => PhMobile::normalize($request->input('mobile_no')),
+            'fax_no' => $request->input('fax_no'),
+            'tel_no' => $request->input('tel_no'),
+            'email' => $request->input('email'),
+        ]);
+
+        return response()->json(['message' => 'Contact settings updated']);
+    }
+
+    /* =========================
+       DATA PRIVACY TAB
+    ========================= */
+
+    public function updatePrivacy(Request $request)
+    {
+        $request->validate([
+            'data_privacy_title' => 'required|string',
+            'data_privacy_popup_content' => 'required|string',
+            'data_privacy_content' => 'required|string',
+            'grapes_html' => 'nullable|string',
+            'grapes_css' => 'nullable|string',
+            'grapes_js' => 'nullable|string',
+        ]);
+
+        DB::transaction(function () use ($request) {
+
+            $this->setting()->update($request->only([
+                'data_privacy_title',
+                'data_privacy_popup_content',
+                'data_privacy_content',
+            ]));
+
+            $dataPrivacy = Page::firstOrCreate(
+                ['slug' => 'data-privacy'],
+                [
+                    'name' => $request->data_privacy_title,
+                    'label' => $request->data_privacy_title,
+                    'status' => 'published',
+                    'page_type' => 'default',
+                    'user_id' => 1,
+                ]
+            );
+
+            $dataPrivacy->update([
+                'name' => $request->data_privacy_title,
+                'label' => $request->data_privacy_title,
+                'contents' => $request->data_privacy_content,
+                'grapes_html' => $request->input('grapes_html', $request->data_privacy_content),
+                'grapes_css' => $request->input('grapes_css', ''),
+                'grapes_js' => $request->input('grapes_js', ''),
+                'content_type' => 'grapes',
+            ]);
+        });
+
+        return response()->json([
+            'message' => 'Data privacy updated successfully'
+        ], 200);
+    }
+
+    /* =========================
+       SOCIAL MEDIA
+    ========================= */
+    public function getSocials(Request $request)
+    {
+        return SocialMediaAccount::where('user_id', $request->user()->id)->get();
+    }
+
+    public function updateSocials(Request $request)
+    {
+        $request->validate([
+            'socials' => 'array',
+            'socials.*.name' => 'required',
+            'socials.*.media_account' => 'required',
+        ]);
+
+        $userId = $request->user()->id;
+        SocialMediaAccount::where('user_id', $userId)->delete();
+
+        foreach ($request->socials as $social) {
+            SocialMediaAccount::create([
+                'name' => $social['name'],
+                'media_account' => $social['media_account'],
+                'user_id' => $userId,
+            ]);
+        }
+
+        return response()->json([
+            'message' => 'Social media accounts updated successfully',
+        ]);
+    }
+
+}

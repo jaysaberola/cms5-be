@@ -1,0 +1,121 @@
+<?php
+
+namespace App\Models;
+
+use App\Support\RelatedPaymentSync;
+use App\Support\TransactionLabelResolver;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
+use OwenIt\Auditing\Auditable;
+use OwenIt\Auditing\Contracts\Auditable as AuditableContract;
+
+class SalesTransaction extends Model implements AuditableContract
+{
+    use SoftDeletes, Auditable;
+
+    protected $fillable = [
+        'transaction_no',
+        'customer_id',
+        'customer_name',
+        'customer_email',
+        'subtotal',
+        'discount_total',
+        'tax_total',
+        'shipping_total',
+        'grand_total',
+        'payment_status',
+        'order_status',
+        'notes',
+        'transacted_at',
+        'user_id',
+        'client_owner_id',
+    ];
+
+    protected $casts = [
+        'subtotal' => 'decimal:2',
+        'discount_total' => 'decimal:2',
+        'tax_total' => 'decimal:2',
+        'shipping_total' => 'decimal:2',
+        'grand_total' => 'decimal:2',
+        'transacted_at' => 'datetime',
+    ];
+
+    protected $appends = [
+        'issued_date',
+        'due_date',
+        'payment_date',
+        'payment_mode',
+    ];
+
+    public function getIssuedDateAttribute(): ?string
+    {
+        return TransactionLabelResolver::issuedDateFrom($this->transacted_at);
+    }
+
+    public function getDueDateAttribute(): ?string
+    {
+        return TransactionLabelResolver::dueDateFrom($this->transacted_at);
+    }
+
+    public function getPaymentDateAttribute(): ?string
+    {
+        return RelatedPaymentSync::dateFrom($this);
+    }
+
+    public function getPaymentModeAttribute(): ?string
+    {
+        return RelatedPaymentSync::modeFrom($this);
+    }
+
+    public function customer()
+    {
+        return $this->belongsTo(User::class, 'customer_id');
+    }
+
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function clientOwner()
+    {
+        return $this->belongsTo(User::class, 'client_owner_id');
+    }
+
+    public function items()
+    {
+        return $this->hasMany(SalesTransactionItem::class);
+    }
+
+    public function proposals()
+    {
+        return $this->hasMany(SalesTransactionProposal::class);
+    }
+
+    public function paynamicsPaymentReferences()
+    {
+        return $this->hasMany(PaynamicsPaymentReference::class);
+    }
+
+    public function paymentProofs()
+    {
+        return $this->hasMany(CustomerPaymentProof::class);
+    }
+
+    public function provisioningRun()
+    {
+        return $this->hasOne(ProvisioningRun::class);
+    }
+
+    /**
+     * Admin draft deals are internal until finalized — hide from the customer portal.
+     */
+    public function scopeCustomerVisible(Builder $query): Builder
+    {
+        return $query->where(function (Builder $q) {
+            $q->whereNull('order_status')
+                ->orWhereRaw("LOWER(TRIM(order_status)) <> 'draft'");
+        });
+    }
+}

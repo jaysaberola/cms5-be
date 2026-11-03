@@ -1,0 +1,415 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\CustomerNotification;
+use App\Models\CustomerPaymentProof;
+use App\Models\CustomerService;
+use App\Models\SalesTransaction;
+use App\Support\DealMeta;
+use App\Support\ProvisioningRules;
+use Illuminate\Support\Collection;
+
+class CustomerPortalNotificationSync
+{
+    public function syncForCustomer(int $customerId): void
+    {
+        $activeKeys = [];
+
+        app(ProvisioningWorkflow::class)->syncOpenForCustomer($customerId);
+        app(CustomerPortalProvisioner::class)->activateReadyForCustomer($customerId);
+
+        $services = CustomerService::query()
+            ->where('customer_id', $customerId)
+            ->with('salesTransaction.provisioningRun.actions')
+            ->get();
+
+        foreach ($services as $service) {
+            $status = CustomerPortalProvisioner::resolveStatusForService($service);
+            if ($status !== $service->status) {
+                $service->status = $status;
+                $service->save();
+            }
+
+            if ($status !== CustomerPortalProvisioner::STATUS_PROVISIONING || $this->technicalProvisioningFinished($service)) {
+                continue;
+            }
+
+            $key = 'provisioning:service:' . $service->id;
+            $activeKeys[] = $key;
+            $this->upsert($customerId, $key, [
+                'title' => 'Provisioning Alert: ' . $service->title,
+                'body' => $service->title . ' is currently provisioning. We\'ll notify you when it\'s active.',
+                'type' => 'provisioning',
+                'action_url' => '/public/dashboard?tab=overview',
+            ]);
+        }
+
+        $services
+            ->filter(fn (CustomerService $service) => $this->technicalProvisioningFinished($service))
+            ->map(fn (CustomerService $service) => $service->salesTransaction)
+            ->filter()
+            ->unique('id')
+            ->each(fn (SalesTransaction $transaction) => $this->notifyTechnicalProvisioningCompleted($transaction));
+
+        $transactions = SalesTransaction::query()
+            ->where('customer_id', $customerId)
+            ->customerVisible()
+            ->with('items')
+            ->latest('transacted_at')
+            ->get();
+
+        foreach ($this->unpaidTransactions($transactions) as $transaction) {
+            $status = CustomerPortalProvisioner::resolveServiceStatus($transaction);
+            $key = 'payment:transaction:' . $transaction->id;
+            $activeKeys[] = $key;
+            $itemNames = $transaction->items->pluck('name')->filter()->take(3)->implode(', ');
+            $submitted = $status === CustomerPortalProvisioner::STATUS_AWAITING_APPROVAL;
+
+            $this->upsert($customerId, $key, [
+                'title' => $submitted ? 'Payment pending admin approval' : 'Pending Payment',
+                'body' => $this->paymentAlertMessage($transaction, $submitted),
+                'type' => 'payment',
+                'action_url' => '/public/dashboard?tab=orders',
+            ]);
+        }
+
+        foreach ($this->paidTransactionsNeedingProof($transactions, $customerId) as $transaction) {
+            $invoiceId = 'INV-' . $transaction->transaction_no;
+            $key = 'paynamics-proof:' . $transaction->id;
+            $activeKeys[] = $key;
+            $this->upsert($customerId, $key, [
+                'title' => 'Submit your Paynamics receipt',
+                'body' => "Your payment for {$invoiceId} went through. Screenshot or download the Paynamics Payment Success page, then upload it in Billing so we can confirm your receipt.",
+                'type' => 'billing',
+                'action_url' => '/public/dashboard?tab=billing&submit_proof=1',
+            ]);
+        }
+
+        CustomerNotification::query()
+            ->where('customer_id', $customerId)
+            ->where(function ($query) {
+                $query->where('reference_key', 'like', 'provisioning:%')
+                    ->orWhere('reference_key', 'like', 'payment:%')
+                    ->orWhere('reference_key', 'like', 'paynamics-proof:%');
+            })
+            ->whereNotIn('reference_key', $activeKeys ?: ['__none__'])
+            ->delete();
+
+        app(ServiceExpirationNotifier::class)->processForCustomer($customerId);
+
+        $this->stripTechnicalFromCustomerNotices($customerId);
+    }
+
+    public function buildOverviewAlerts(Collection $services, Collection $transactions): array
+    {
+        $alerts = [];
+        $provisioning = $services->filter(
+            fn (CustomerService $service) => CustomerPortalProvisioner::resolveStatusForService($service)
+                === CustomerPortalProvisioner::STATUS_PROVISIONING
+                && ! $this->technicalProvisioningFinished($service)
+        );
+        $unpaid = $this->unpaidTransactions($transactions);
+
+        if ($provisioning->isNotEmpty()) {
+            $count = $provisioning->count();
+            $alerts[] = [
+                'id' => 'alert-provisioning-summary',
+                'tone' => 'provisioning',
+                'title' => $count === 1
+                    ? 'Provisioning Alert: ' . $provisioning->first()->title
+                    : 'Provisioning Alerts (' . $count . ')',
+                'message' => $count === 1
+                    ? $provisioning->first()->title . ' is currently provisioning. We\'ll notify you when it\'s active.'
+                    : 'You have ' . $count . ' services currently provisioning. We\'ll notify you when they\'re active.',
+                'actionLabel' => 'View Alerts',
+                'actionHref' => '/public/dashboard?tab=notification',
+                'icon' => 'bell',
+            ];
+        }
+
+        if ($unpaid->isNotEmpty()) {
+            $count = $unpaid->count();
+            $first = $unpaid->first();
+            $submitted = CustomerPortalProvisioner::resolveServiceStatus($first)
+                === CustomerPortalProvisioner::STATUS_AWAITING_APPROVAL;
+            $alerts[] = [
+                'id' => 'alert-payment-summary',
+                'tone' => 'payment',
+                'title' => $submitted || $count > 1
+                    ? 'Payment pending admin approval'
+                    : 'Pending Payment',
+                'message' => $count === 1
+                    ? $this->paymentAlertMessage($first, $submitted)
+                    : 'You have ' . $count . ' orders pending payment. Provisioning begins only after payment is complete.',
+                'actionLabel' => 'View Orders',
+                'actionHref' => '/public/dashboard?tab=orders',
+                'icon' => 'card',
+            ];
+        }
+
+        $expiringSoon = $services->filter(function (CustomerService $service) {
+            if (strtolower((string) $service->status) === 'expired') {
+                return false;
+            }
+            $days = app(ServiceExpirationNotifier::class)->daysUntilExpiry($service);
+
+            return $days !== null && $days >= 0 && $days <= 30;
+        });
+        if ($expiringSoon->isNotEmpty()) {
+            $count = $expiringSoon->count();
+            $first = $expiringSoon->first();
+            $days = app(ServiceExpirationNotifier::class)->daysUntilExpiry($first);
+            $alerts[] = [
+                'id' => 'alert-service-expiry',
+                'tone' => 'billing',
+                'title' => $count === 1 ? 'Service expiring soon' : 'Services expiring soon',
+                'message' => $count === 1
+                    ? ($first->title ?: 'A service') . ' expires in ' . max(0, (int) $days) . ' day(s). Renew to avoid interruption.'
+                    : 'You have ' . $count . ' services expiring within 30 days.',
+                'actionLabel' => 'View Services',
+                'actionHref' => '/public/dashboard?tab=orders&renew=1',
+                'icon' => 'bell',
+            ];
+        }
+
+        $expired = $services->filter(function (CustomerService $service) {
+            return app(ServiceExpirationNotifier::class)->isExpired($service);
+        });
+        if ($expired->isNotEmpty()) {
+            $count = $expired->count();
+            $first = $expired->first();
+            $alerts[] = [
+                'id' => 'alert-service-renewal',
+                'tone' => 'payment',
+                'title' => $count === 1 ? 'Renew expired service' : 'Renew expired services',
+                'message' => $count === 1
+                    ? ($first->title ?: 'A service') . ' has expired. Renew to make it active again.'
+                    : 'You have ' . $count . ' expired services. Renew to restore active service.',
+                'actionLabel' => 'View Services',
+                'actionHref' => '/public/dashboard?tab=orders&renew=1',
+                'icon' => 'bell',
+            ];
+        }
+
+        $proofNeeded = $this->paidTransactionsNeedingProof($transactions, (int) ($services->first()?->customer_id ?? $transactions->first()?->customer_id ?? 0));
+        if ($proofNeeded->isNotEmpty()) {
+            $first = $proofNeeded->first();
+            $invoiceId = 'INV-' . $first->transaction_no;
+            $count = $proofNeeded->count();
+            $alerts[] = [
+                'id' => 'alert-paynamics-proof',
+                'tone' => 'billing',
+                'title' => 'Submit your Paynamics receipt',
+                'message' => $count === 1
+                    ? "Screenshot or download the Paynamics Payment Success page for {$invoiceId}, then upload it in Billing."
+                    : "You have {$count} paid invoices waiting for a Paynamics Payment Success screenshot.",
+                'actionLabel' => 'Upload Receipt',
+                'actionHref' => '/public/dashboard?tab=billing&submit_proof=1',
+                'icon' => 'card',
+            ];
+        }
+
+        return $alerts;
+    }
+
+    private function paymentAlertMessage(SalesTransaction $transaction, bool $submitted = false): string
+    {
+        $itemNames = $transaction->items->pluck('name')->filter()->take(3)->implode(', ');
+        $label = $itemNames ?: $transaction->transaction_no;
+
+        if ($submitted) {
+            return 'We received your order for ' . $label
+                . '. Payment is pending admin approval. Provisioning begins only after payment is complete.';
+        }
+
+        return 'We received your order for ' . $label
+            . '. Complete payment to start provisioning.';
+    }
+
+    public function notifyTechnicalProvisioningCompleted(SalesTransaction $transaction): void
+    {
+        if (! $transaction->customer_id) {
+            return;
+        }
+
+        $transaction->loadMissing('items', 'provisioningRun.actions');
+        $names = $transaction->items->pluck('name')->filter()->take(4)->implode(', ');
+        $orderNo = $transaction->transaction_no ?: ('Order ' . $transaction->id);
+        $finished = $names !== ''
+            ? "Technical Support finished provisioning {$orderNo} ({$names})."
+            : "Technical Support finished provisioning {$orderNo}.";
+        $runCompleted = $transaction->provisioningRun?->status === 'completed';
+        $this->upsert((int) $transaction->customer_id, 'order-provisioned:' . $transaction->id, [
+            'title' => $runCompleted ? 'Service Now Active' : 'Technical provisioning completed',
+            'body' => $runCompleted
+                ? "{$finished} The order is now Active."
+                : "{$finished} The status becomes Active after the countdown finishes.",
+            'type' => 'provisioning',
+            'action_url' => '/public/dashboard?tab=orders',
+        ]);
+
+        $serviceIds = CustomerService::query()
+            ->where('sales_transaction_id', $transaction->id)
+            ->pluck('id');
+        if ($serviceIds->isEmpty()) {
+            return;
+        }
+
+        CustomerNotification::query()
+            ->where('customer_id', $transaction->customer_id)
+            ->whereIn(
+                'reference_key',
+                $serviceIds->map(fn ($id) => 'provisioning:service:' . $id)->all()
+            )
+            ->delete();
+    }
+
+    public function notifyServiceActivated(CustomerService $service): void
+    {
+        CustomerNotification::query()
+            ->where('customer_id', $service->customer_id)
+            ->where('reference_key', 'provisioning:service:' . $service->id)
+            ->delete();
+
+        $this->upsert($service->customer_id, 'activated:service:' . $service->id, [
+            'title' => 'Service Now Active: ' . $service->title,
+            'body' => $service->title . ' is now live on your account.',
+            'type' => 'general',
+            'action_url' => '/public/dashboard?tab=overview',
+        ]);
+    }
+
+    private function technicalProvisioningFinished(CustomerService $service): bool
+    {
+        $transaction = $service->salesTransaction;
+        if (! $transaction) {
+            return false;
+        }
+
+        $transaction->loadMissing('provisioningRun.actions');
+        $run = $transaction->provisioningRun;
+        if (! $run) {
+            return false;
+        }
+
+        if ($run->status === 'completed') {
+            return true;
+        }
+
+        $actions = $run->actions;
+
+        return $actions->isNotEmpty()
+            && $actions->every(fn ($action) => ProvisioningRules::isSettledStatus($action->status));
+    }
+
+    private function unpaidTransactions(Collection $transactions): Collection
+    {
+        return $transactions->filter(
+            fn (SalesTransaction $row) => ! DealMeta::isDraftOrder($row)
+                && CustomerPortalProvisioner::isUnpaid($row)
+        );
+    }
+
+    /**
+     * @param  Collection<int, SalesTransaction>  $transactions
+     * @return Collection<int, SalesTransaction>
+     */
+    private function paidTransactionsNeedingProof(Collection $transactions, int $customerId): Collection
+    {
+        if ($customerId < 1) {
+            return collect();
+        }
+
+        $paid = $transactions->filter(function (SalesTransaction $row) {
+            if (DealMeta::isDraftOrder($row)) {
+                return false;
+            }
+
+            return in_array(strtolower((string) $row->payment_status), ['paid', 'completed', 'success'], true);
+        });
+
+        if ($paid->isEmpty()) {
+            return collect();
+        }
+
+        $invoiceIds = $paid->map(fn (SalesTransaction $row) => 'INV-' . $row->transaction_no)->all();
+        $covered = CustomerPaymentProof::query()
+            ->where('customer_id', $customerId)
+            ->where(function ($query) use ($paid, $invoiceIds) {
+                $query->whereIn('sales_transaction_id', $paid->pluck('id')->all())
+                    ->orWhereIn('invoice_id', $invoiceIds);
+            })
+            ->get();
+
+        return $paid
+            ->reject(function (SalesTransaction $row) use ($covered) {
+                $invoiceId = 'INV-' . $row->transaction_no;
+
+                return $covered->contains(function (CustomerPaymentProof $proof) use ($row, $invoiceId) {
+                    return (int) $proof->sales_transaction_id === (int) $row->id
+                        || $proof->invoice_id === $invoiceId;
+                });
+            })
+            ->values();
+    }
+
+    private function stripTechnicalFromCustomerNotices(int $customerId): void
+    {
+        $rows = CustomerNotification::query()
+            ->where('customer_id', $customerId)
+            ->where(function ($query) {
+                $query->where('title', 'like', '%Technical%')
+                    ->orWhere('body', 'like', '%Technical%');
+            })
+            ->get();
+
+        foreach ($rows as $row) {
+            $title = self::customerNoticeTitle((string) $row->title);
+            $body = self::customerNoticeBody((string) $row->body);
+            if ($title === $row->title && $body === $row->body) {
+                continue;
+            }
+            $row->fill([
+                'title' => $title,
+                'body' => $body,
+            ])->save();
+        }
+    }
+
+    public static function customerNoticeTitle(string $title): string
+    {
+        $text = trim(preg_replace('/\btechnical\s+/i', '', $title) ?? $title);
+        $text = trim(preg_replace('/\s+/', ' ', $text) ?? $text);
+        if (preg_match('/provisioning completed/i', $text)) {
+            return 'Provisioning Completed';
+        }
+
+        return $text !== '' ? $text : 'Provisioning Completed';
+    }
+
+    public static function customerNoticeBody(string $body): string
+    {
+        $text = preg_replace('/\bTechnical Support finished provisioning\b/i', 'Provisioning finished for', $body) ?? $body;
+        $text = preg_replace('/\bTechnical support finished provisioning\b/i', 'Provisioning finished for', $text) ?? $text;
+        $text = preg_replace('/\btechnical\s+/i', '', $text) ?? $text;
+
+        return trim($text);
+    }
+
+    private function upsert(int $customerId, string $referenceKey, array $payload): void
+    {
+        CustomerNotification::updateOrCreate(
+            [
+                'customer_id' => $customerId,
+                'reference_key' => $referenceKey,
+            ],
+            [
+                'title' => $payload['title'],
+                'body' => $payload['body'],
+                'type' => $payload['type'],
+                'action_url' => $payload['action_url'],
+            ]
+        );
+    }
+}

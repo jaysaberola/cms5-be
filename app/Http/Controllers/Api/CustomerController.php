@@ -1,0 +1,939 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\CustomerService;
+use App\Models\SalesTransaction;
+use App\Models\User;
+use App\Services\ClientOwnerRotator;
+use App\Services\CustomerPortalProvisioner;
+use App\Support\ServiceCatalogLabelResolver;
+use App\Support\StorageUrl;
+use App\Support\PhMobile;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
+use Spatie\Permission\Models\Role;
+
+class CustomerController extends Controller
+{
+    private const ROLE = 'customer';
+
+    private function ensureCustomerRole(): void
+    {
+        Role::firstOrCreate(
+            ['name' => self::ROLE, 'guard_name' => 'sanctum'],
+            ['description' => 'Customer']
+        );
+    }
+
+    public function index(Request $request)
+    {
+        $this->ensureCustomerRole();
+
+        $perPage = $request->integer('per_page', 10);
+
+        $customers = User::with([
+                'roles',
+                'owner:id,fname,lname,email',
+                'customerServices' => fn ($q) => $q->whereIn('status', CustomerPortalProvisioner::activeStatusValues())->orderBy('id'),
+            ])
+            ->withCount([
+                'customerServices as active_services_count' => fn ($q) => $q->whereIn('status', CustomerPortalProvisioner::activeStatusValues()),
+                'salesTransactions as orders_count',
+            ])
+            ->role(self::ROLE)
+            ->when($request->filled('search'), function ($q) use ($request) {
+                $q->where(function ($qq) use ($request) {
+                    $qq->where('fname', 'like', "%{$request->search}%")
+                       ->orWhere('lname', 'like', "%{$request->search}%")
+                       ->orWhere('email', 'like', "%{$request->search}%")
+                       ->orWhere('mname', 'like', "%{$request->search}%")
+                       ->orWhere('website', 'like', "%{$request->search}%");
+                });
+            })
+            ->when($request->filled('name'), function ($q) use ($request) {
+                $term = $request->input('name');
+                $q->where(function ($qq) use ($term) {
+                    $qq->where('fname', 'like', "%{$term}%")
+                       ->orWhere('mname', 'like', "%{$term}%")
+                       ->orWhere('lname', 'like', "%{$term}%");
+                });
+            })
+            ->when($request->filled('email'), function ($q) use ($request) {
+                $q->where('email', 'like', '%' . $request->input('email') . '%');
+            })
+            ->when($request->filled('date_registered_from'), function ($q) use ($request) {
+                $q->whereDate('created_at', '>=', $request->input('date_registered_from'));
+            })
+            ->when($request->filled('date_registered_to'), function ($q) use ($request) {
+                $q->whereDate('created_at', '<=', $request->input('date_registered_to'));
+            })
+            ->when($request->filled('status'), function ($q) use ($request) {
+                $isActive = strtolower((string) $request->status) === 'active';
+                $q->where('is_active', $isActive);
+            })
+            ->latest()
+            ->paginate($perPage);
+
+        $paginator = $customers->through(function ($customer) {
+                $owner = $customer->owner;
+                $ownerName = $owner
+                    ? (trim(($owner->fname ?? '') . ' ' . ($owner->lname ?? '')) ?: ($owner->email ?? null))
+                    : null;
+                $serviceSummary = $this->summarizeCustomerServices($customer);
+
+                return [
+                    'id' => $customer->id,
+                    'name' => $customer->mname ?: ($customer->full_name ?: $customer->email),
+                    'representative' => $customer->full_name,
+                    'company' => $customer->mname,
+                    'fname' => $customer->fname,
+                    'lname' => User::usableLastName($customer->lname, $customer->mname),
+                    'email' => $customer->email,
+                    'avatar' => $customer->avatar,
+                    'type' => 'Customer',
+                    'role' => $customer->getRoleNames()->first(),
+                    'created_at' => $customer->created_at,
+                    'date_registered' => optional($customer->created_at)->format('F d, Y'),
+                    'status' => $customer->is_active ? 'Active' : 'Inactive',
+                    'active_services_count' => (int) ($customer->active_services_count ?? 0),
+                    'orders_count' => (int) ($customer->orders_count ?? 0),
+                    'owner_id' => $customer->owner_id,
+                    'owner' => $owner ? [
+                        'id' => $owner->id,
+                        'name' => $ownerName,
+                        'email' => $owner->email,
+                    ] : null,
+                    'owner_name' => $ownerName,
+                    'client_classification' => $customer->client_classification,
+                    'client_type' => $customer->client_type,
+                    'billing_in_charge' => $customer->billing_in_charge,
+                    'contact_person' => User::sanitizePersonName($customer->contact_person) ?: $customer->full_name,
+                    'website' => $customer->website,
+                    'service_name' => $serviceSummary['service_name'],
+                    'plan_name' => $serviceSummary['plan_name'],
+                    'subject' => $serviceSummary['subject'],
+                    'product_category' => $serviceSummary['product_category'],
+                    'domain' => $serviceSummary['domain'],
+                    'subject_domain' => $serviceSummary['subject_domain'],
+                    'services' => $serviceSummary['services'],
+                ];
+            });
+
+        return response()->json([
+            'data' => $paginator->items(),
+            'meta' => [
+                'current_page' => $customers->currentPage(),
+                'last_page' => $customers->lastPage(),
+                'total' => $customers->total(),
+            ],
+        ]);
+    }
+
+    public function store(Request $request)
+    {
+        $this->ensureCustomerRole();
+        $this->normalizeClientRequest($request);
+
+        $validated = $request->validate(array_merge(
+            $this->clientProfileRules(true),
+            [
+                'services' => ['nullable', 'array'],
+                'services.*' => ['required', 'string', 'max:255'],
+                'addons' => ['nullable', 'array'],
+                'addons.*' => ['string', 'max:255'],
+                'avatar' => ['nullable', 'image', 'mimes:jpeg,png,jpg,webp', 'max:2048'],
+            ]
+        ));
+
+        [$fname, $lname] = $this->resolveContactNames($validated);
+
+        $avatarPath = null;
+        if ($request->hasFile('avatar')) {
+            $avatarPath = $request->file('avatar')->store('avatars', 'public');
+        }
+
+        $filePaths = $this->storeClientDocuments($request);
+
+        $customer = User::create(array_merge(
+            [
+                'fname' => $fname,
+                'lname' => $lname,
+                'mname' => $validated['company'],
+                'email' => $validated['email'],
+                'mobile' => PhMobile::normalize($validated['mobile'] ?? null),
+                'phone' => $validated['phone'] ?? null,
+                'address_street' => $validated['address_street'] ?? null,
+                'avatar' => $avatarPath,
+                'password' => Hash::make('password'),
+                'is_active' => true,
+                'owner_id' => $validated['owner_id'] ?? null,
+            ],
+            $this->clientProfileAttributes($validated),
+            $filePaths
+        ));
+
+        $customer->assignRole(self::ROLE);
+
+        $renewAt = now()->addYear();
+
+        foreach ($validated['services'] ?? [] as $serviceTitle) {
+            CustomerService::create([
+                'customer_id' => $customer->id,
+                'title' => $serviceTitle,
+                'category' => $this->resolveServiceCategory($serviceTitle),
+                'plan' => $serviceTitle,
+                'status' => 'Active',
+                'renew_label' => 'Renews',
+                'renew_at' => $renewAt,
+                'renew_note' => $renewAt->format('M j, Y') . ' · 365 days left',
+            ]);
+        }
+
+        foreach ($validated['addons'] ?? [] as $addonTitle) {
+            if (!trim($addonTitle)) {
+                continue;
+            }
+
+            CustomerService::create([
+                'customer_id' => $customer->id,
+                'title' => $addonTitle,
+                'category' => 'Add-on',
+                'plan' => $addonTitle,
+                'status' => 'Active',
+                'renew_label' => 'Renews',
+                'renew_at' => $renewAt,
+                'renew_note' => $renewAt->format('M j, Y') . ' · 365 days left',
+            ]);
+        }
+
+        return response()->json([
+            'message' => 'Customer created successfully',
+            'data' => [
+                'id' => $customer->id,
+                'name' => $customer->mname ?: $customer->full_name,
+                'email' => $customer->email,
+                'role' => self::ROLE,
+            ],
+        ], 201);
+    }
+
+    private function resolveServiceCategory(string $name): string
+    {
+        $haystack = strtolower(trim($name));
+
+        if (str_contains($haystack, 'domain')) {
+            return 'Domains';
+        }
+        if (str_contains($haystack, 'dedicated') || str_contains($haystack, 'baremetal') || str_contains($haystack, 'bare-metal')) {
+            return 'Dedicated Server';
+        }
+        if (str_contains($haystack, 'hosting') || str_contains($haystack, 'cloud') || str_contains($haystack, 'canvas')) {
+            return 'Shared Hosting';
+        }
+        if (str_contains($haystack, 'dms') || str_contains($haystack, 'document')) {
+            return 'Document Management System';
+        }
+        if (str_contains($haystack, 'design') || str_contains($haystack, 'web focus') || str_contains($haystack, 'canvas')) {
+            return 'Custom Web Design';
+        }
+
+        if (preg_match('/business starter|professional corporate|e-?commerce plus|starter launch|website template/i', $haystack)) {
+            return 'Custom Web Design';
+        }
+
+        return 'Hosting';
+    }
+
+    /**
+     * @return array{
+     *     service_name: ?string,
+     *     plan_name: ?string,
+     *     subject: ?string,
+     *     product_category: ?string,
+     *     domain: ?string,
+     *     subject_domain: ?string,
+     *     services: list<array<string, mixed>>
+     * }
+     */
+    private function summarizeCustomerServices(User $customer): array
+    {
+        $website = trim((string) ($customer->website ?? ''));
+        $lines = collect($customer->customerServices ?? [])
+            ->map(function (CustomerService $service) use ($website) {
+                $labels = ServiceCatalogLabelResolver::describe(
+                    $service->title,
+                    $service->category,
+                    $service->plan,
+                    $website,
+                );
+
+                return [
+                    'id' => $service->id,
+                    'title' => $service->title,
+                    'category' => $service->category,
+                    'plan' => $service->plan,
+                    'status' => $service->status,
+                    'renew_at' => optional($service->renew_at)->toIso8601String(),
+                    'service_name' => $labels['service_name'],
+                    'plan_name' => $labels['plan_name'],
+                    'subject' => $labels['subject'],
+                    'product_category' => $labels['product_category'],
+                    'domain' => $labels['domain'],
+                ];
+            })
+            ->values();
+
+        $unique = fn (string $key) => $lines
+            ->pluck($key)
+            ->filter(fn ($value) => filled($value))
+            ->unique()
+            ->values();
+
+        $serviceNames = $unique('service_name');
+        $planNames = $unique('plan_name');
+        $subjects = $unique('subject');
+        $productCategories = $unique('product_category');
+        $domains = $unique('domain');
+
+        $subjectDomain = collect([$subjects->implode(', '), $domains->implode(', ')])
+            ->filter()
+            ->implode(' ');
+
+        return [
+            'service_name' => $serviceNames->isEmpty() ? null : $serviceNames->implode(', '),
+            'plan_name' => $planNames->isEmpty() ? null : $planNames->implode(', '),
+            'subject' => $subjects->isEmpty() ? null : $subjects->implode(', '),
+            'product_category' => $productCategories->isEmpty() ? null : $productCategories->implode(', '),
+            'domain' => $domains->isEmpty() ? null : $domains->implode(', '),
+            'subject_domain' => $subjectDomain !== '' ? $subjectDomain : null,
+            'services' => $lines->all(),
+        ];
+    }
+
+    public function show(User $customer)
+    {
+        abort_unless($customer->hasRole(self::ROLE), 404);
+        $customer->loadMissing('owner');
+
+        $customerTransactions = SalesTransaction::query()
+            ->where('customer_id', $customer->id)
+            ->orderByDesc('created_at')
+            ->get(['id', 'transaction_no', 'grand_total', 'payment_status', 'order_status', 'transacted_at', 'created_at']);
+
+        $transactionIds = $customerTransactions->pluck('id');
+
+        $activityLogs = DB::table('audits')
+            ->leftJoin('users as actors', 'audits.user_id', '=', 'actors.id')
+            ->where(function ($query) use ($customer, $transactionIds) {
+                $query->where(function ($auditable) use ($customer) {
+                    $auditable
+                        ->where('audits.auditable_id', $customer->id)
+                        ->where(function ($type) {
+                            $type->where('audits.auditable_type', User::class)
+                                ->orWhere('audits.auditable_type', 'App\\Models\\User')
+                                ->orWhere('audits.auditable_type', 'like', '%User');
+                        });
+                });
+
+                if ($transactionIds->isNotEmpty()) {
+                    $query->orWhere(function ($invoiceAudits) use ($transactionIds) {
+                        $invoiceAudits
+                            ->whereIn('audits.auditable_id', $transactionIds)
+                            ->where(function ($type) {
+                                $type->where('audits.auditable_type', SalesTransaction::class)
+                                    ->orWhere('audits.auditable_type', 'App\\Models\\SalesTransaction')
+                                    ->orWhere('audits.auditable_type', 'like', '%SalesTransaction');
+                            });
+                    });
+                }
+            })
+            ->orderByDesc('audits.created_at')
+            ->select([
+                'audits.id',
+                'audits.event',
+                'audits.auditable_type',
+                'audits.auditable_id',
+                'audits.old_values',
+                'audits.new_values',
+                'audits.ip_address',
+                'audits.user_agent',
+                'audits.user_id',
+                'audits.created_at',
+                'actors.fname as actor_fname',
+                'actors.lname as actor_lname',
+                'actors.email as actor_email',
+            ])
+            ->get()
+            ->map(function ($audit) use ($customerTransactions) {
+                $actorName = trim(($audit->actor_fname ?? '') . ' ' . ($audit->actor_lname ?? ''));
+                if ($actorName === '') {
+                    $actorName = $audit->actor_email;
+                }
+
+                $auditableType = class_basename((string) $audit->auditable_type);
+                $oldValues = json_decode($audit->old_values, true) ?: [];
+                $newValues = json_decode($audit->new_values, true) ?: [];
+                $transactionNo = null;
+                $invoiceId = null;
+
+                if (strcasecmp($auditableType, 'SalesTransaction') === 0) {
+                    $transaction = $customerTransactions->firstWhere('id', (int) $audit->auditable_id);
+                    $transactionNo = $transaction?->transaction_no
+                        ?? ($newValues['transaction_no'] ?? null)
+                        ?? ($oldValues['transaction_no'] ?? null);
+                    if (filled($transactionNo)) {
+                        $invoiceId = 'INV-' . $transactionNo;
+                    }
+                }
+
+                return [
+                    'id' => $audit->id,
+                    'event' => $audit->event,
+                    'auditable_type' => $auditableType,
+                    'auditable_id' => $audit->auditable_id,
+                    'old_values' => $oldValues,
+                    'new_values' => $newValues,
+                    'transaction_no' => $transactionNo,
+                    'invoice_id' => $invoiceId,
+                    'ip_address' => $audit->ip_address,
+                    'user_agent' => $audit->user_agent,
+                    'user_id' => $audit->user_id,
+                    'actor_name' => $actorName ?: null,
+                    'created_at' => $audit->created_at,
+                ];
+            })
+            ->values();
+
+        return response()->json([
+            'data' => array_merge([
+                'id' => $customer->id,
+                'fname' => $customer->fname,
+                'lname' => User::usableLastName($customer->lname, $customer->mname),
+                'company' => $customer->mname,
+                'email' => $customer->email,
+                'mobile' => $customer->mobile,
+                'phone' => $customer->phone,
+                'address_street' => $customer->address_street,
+                'address_city' => $customer->address_city,
+                'address_province' => $customer->address_province,
+                'address_region' => $customer->address_region,
+                'address_zip' => $customer->address_zip,
+                'address_country' => $customer->address_country,
+                'avatar' => $customer->avatar,
+                'type' => 'Customer',
+                'role' => self::ROLE,
+                'created_at' => $customer->created_at,
+                'date_registered' => optional($customer->created_at)->format('F d, Y'),
+                'is_active' => $customer->is_active,
+                'owner_id' => $customer->owner_id,
+                'owner' => $customer->owner ? [
+                    'id' => $customer->owner->id,
+                    'name' => trim(($customer->owner->fname ?? '') . ' ' . ($customer->owner->lname ?? ''))
+                        ?: ($customer->owner->email ?? null),
+                    'email' => $customer->owner->email,
+                ] : null,
+                'owner_name' => $customer->owner
+                    ? (trim(($customer->owner->fname ?? '') . ' ' . ($customer->owner->lname ?? ''))
+                        ?: ($customer->owner->email ?? null))
+                    : null,
+                'audits' => $activityLogs,
+                'invoices' => $customerTransactions->map(fn (SalesTransaction $row) => [
+                    'id' => $row->id,
+                    'transaction_no' => $row->transaction_no,
+                    'invoice_id' => 'INV-' . $row->transaction_no,
+                    'grand_total' => $row->grand_total,
+                    'payment_status' => $row->payment_status,
+                    'order_status' => $row->order_status,
+                    'transacted_at' => optional($row->transacted_at)->toIso8601String(),
+                    'created_at' => optional($row->created_at)->toIso8601String(),
+                ])->values(),
+            ], $this->clientProfilePayload($customer)),
+        ]);
+    }
+
+    public function update(Request $request, User $customer)
+    {
+        abort_unless($customer->hasRole(self::ROLE), 404);
+
+        if ($request->isMethod('POST') && in_array(strtoupper((string) $request->input('_method')), ['PUT', 'PATCH'], true)) {
+            $request->setMethod('PUT');
+        }
+
+        $this->normalizeClientRequest($request);
+
+        $validated = $request->validate(array_merge(
+            $this->clientProfileRules(false, $customer->id),
+            [
+                'avatar' => ['nullable', 'image', 'mimes:jpeg,png,jpg,webp', 'max:2048'],
+                'is_active' => ['sometimes', 'boolean'],
+                'services' => ['nullable', 'array'],
+                'services.*' => ['string', 'max:255'],
+                'addons' => ['nullable', 'array'],
+                'addons.*' => ['string', 'max:255'],
+            ]
+        ));
+
+        [$fname, $lname] = $this->resolveContactNames($validated, $customer);
+
+        $avatarPath = $customer->avatar;
+        if ($request->hasFile('avatar')) {
+            if ($customer->avatar && Storage::disk('public')->exists($customer->avatar)) {
+                Storage::disk('public')->delete($customer->avatar);
+            }
+            $avatarPath = $request->file('avatar')->store('avatars', 'public');
+        }
+
+        $filePaths = $this->storeClientDocuments($request, $customer);
+
+        $previousOwnerId = $customer->owner_id;
+
+        $customer->update(array_merge(
+            [
+                'fname' => $fname,
+                'lname' => $lname,
+                'mname' => $validated['company'] ?? $customer->mname,
+                'email' => $validated['email'],
+                'mobile' => array_key_exists('mobile', $validated) && $validated['mobile'] !== null && $validated['mobile'] !== ''
+                    ? PhMobile::normalize($validated['mobile'])
+                    : $customer->mobile,
+                'phone' => $validated['phone'] ?? $customer->phone,
+                'address_street' => $validated['address_street'] ?? $customer->address_street,
+                'avatar' => $avatarPath,
+                'is_active' => array_key_exists('is_active', $validated)
+                    ? (bool) $validated['is_active']
+                    : $customer->is_active,
+                'owner_id' => array_key_exists('owner_id', $validated)
+                    ? $validated['owner_id']
+                    : $customer->owner_id,
+            ],
+            $this->clientProfileAttributes($validated),
+            $filePaths
+        ));
+
+        $customer->syncRoles([self::ROLE]);
+
+        if (
+            array_key_exists('owner_id', $validated)
+            && (int) ($customer->owner_id ?? 0) !== (int) ($previousOwnerId ?? 0)
+        ) {
+            app(ClientOwnerRotator::class)->syncDealsForCustomer($customer);
+        }
+
+        if ($request->has('services') || $request->has('addons')) {
+            $this->syncCustomerServices(
+                $customer,
+                $validated['services'] ?? [],
+                $validated['addons'] ?? []
+            );
+        }
+
+        return response()->json([
+            'message' => 'Customer updated successfully',
+            'data' => [
+                'id' => $customer->id,
+                'name' => $customer->mname ?: $customer->full_name,
+                'email' => $customer->email,
+            ],
+        ]);
+    }
+
+    public function destroy(User $customer)
+    {
+        abort_unless($customer->hasRole(self::ROLE), 404);
+        $customer->delete();
+
+        return response()->json([
+            'message' => 'Customer deleted successfully',
+        ]);
+    }
+
+    public function bulkDestroy(Request $request)
+    {
+        $validated = $request->validate([
+            'ids' => ['required', 'array', 'min:1'],
+            'ids.*' => ['integer', 'exists:users,id'],
+        ]);
+
+        $customers = User::query()
+            ->role(self::ROLE)
+            ->whereIn('id', $validated['ids'])
+            ->get();
+
+        foreach ($customers as $customer) {
+            $customer->delete();
+        }
+
+        return response()->json([
+            'message' => $customers->count() . ' customer(s) deleted successfully',
+            'deleted' => $customers->pluck('id')->values(),
+        ]);
+    }
+
+    private function normalizeClientRequest(Request $request): void
+    {
+        if ($request->has('owner_id') && ($request->input('owner_id') === '' || $request->input('owner_id') === 'null')) {
+            $request->merge(['owner_id' => null]);
+        }
+
+        if ($request->has('mobile')) {
+            $text = trim((string) $request->input('mobile'));
+            $request->merge(['mobile' => $text === '' ? null : $text]);
+        }
+
+        if ($request->has('contact_information') && is_string($request->input('contact_information'))) {
+            $decoded = json_decode((string) $request->input('contact_information'), true);
+            $request->merge([
+                'contact_information' => is_array($decoded) ? $decoded : null,
+            ]);
+        }
+    }
+
+    private function syncCustomerServices(User $customer, array $services, array $addons): void
+    {
+        $desired = collect($services)
+            ->merge($addons)
+            ->map(fn ($title) => trim((string) $title))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $addonTitles = collect($addons)
+            ->map(fn ($title) => trim((string) $title))
+            ->filter()
+            ->unique();
+
+        $existing = CustomerService::query()
+            ->where('customer_id', $customer->id)
+            ->whereIn('status', CustomerPortalProvisioner::activeStatusValues())
+            ->get();
+
+        $renewAt = now()->addYear();
+
+        foreach ($desired as $title) {
+            if ($existing->contains(fn (CustomerService $service) => $service->title === $title)) {
+                continue;
+            }
+
+            $isAddon = $addonTitles->contains($title);
+
+            CustomerService::create([
+                'customer_id' => $customer->id,
+                'title' => $title,
+                'category' => $isAddon ? 'Add-on' : $this->resolveServiceCategory($title),
+                'plan' => $title,
+                'status' => 'Active',
+                'renew_label' => 'Renews',
+                'renew_at' => $renewAt,
+                'renew_note' => $renewAt->format('M j, Y') . ' · 365 days left',
+            ]);
+        }
+
+        foreach ($existing as $service) {
+            if ($desired->contains($service->title)) {
+                continue;
+            }
+
+            if ($service->sales_transaction_id) {
+                continue;
+            }
+
+            $service->update(['status' => 'Expired']);
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function clientProfileRules(bool $creating, ?int $ignoreUserId = null): array
+    {
+        $emailRule = $creating
+            ? ['required', 'email', 'unique:users,email']
+            : ['required', 'email', Rule::unique('users')->ignore($ignoreUserId)];
+
+        return [
+            'fname' => [$creating ? 'nullable' : 'nullable', 'string', 'max:255'],
+            'lname' => ['nullable', 'string', 'max:255'],
+            'company' => [$creating ? 'required' : 'nullable', 'string', 'max:255'],
+            'email' => $emailRule,
+            'address_street' => ['nullable', 'string', 'max:500'],
+            'address_city' => ['nullable', 'string', 'max:255'],
+            'address_province' => ['nullable', 'string', 'max:255'],
+            'address_region' => ['nullable', 'string', 'max:255'],
+            'address_zip' => ['nullable', 'string', 'max:50'],
+            'address_country' => ['nullable', 'string', 'max:255'],
+            'shipping_street' => ['nullable', 'string', 'max:500'],
+            'shipping_city' => ['nullable', 'string', 'max:255'],
+            'shipping_province' => ['nullable', 'string', 'max:255'],
+            'shipping_region' => ['nullable', 'string', 'max:255'],
+            'shipping_zip' => ['nullable', 'string', 'max:50'],
+            'shipping_country' => ['nullable', 'string', 'max:255'],
+            'mobile' => PhMobile::rule(false),
+            'phone' => ['nullable', 'string', 'max:50'],
+            'owner_id' => ['nullable', 'integer', 'exists:users,id'],
+            'industry' => ['nullable', 'string', 'max:255'],
+            'tax_classification' => ['nullable', 'string', 'max:255'],
+            'tin_number' => ['nullable', 'string', 'max:100'],
+            'other_numbers' => ['nullable', 'string', 'max:255'],
+            'currency' => ['nullable', 'string', 'max:10'],
+            'workdrive_folder_url' => ['nullable', 'string', 'max:500'],
+            'workdrive_folder_id' => ['nullable', 'string', 'max:255'],
+            'client_classification' => ['nullable', 'string', 'max:100'],
+            'client_type' => ['nullable', 'string', 'max:100'],
+            'contact_person' => ['nullable', 'string', 'max:255'],
+            'website' => ['nullable', 'string', 'max:255'],
+            'ownership' => ['nullable', 'string', 'max:100'],
+            'billing_in_charge' => ['nullable', 'string', 'max:255'],
+            'exchange_rate' => ['nullable', 'numeric', 'min:0'],
+            'bir_certificate' => ['nullable', 'file', 'max:5120'],
+            'business_permit' => ['nullable', 'file', 'max:5120'],
+            'sec_dti_registration' => ['nullable', 'file', 'max:5120'],
+            'valid_id_signatories' => ['nullable', 'file', 'max:5120'],
+            'gen_info_sheet' => ['nullable', 'file', 'max:5120'],
+            'contact_information' => ['nullable', 'array'],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     * @return array{0: string, 1: string}
+     */
+    private function resolveContactNames(array $validated, ?User $existing = null): array
+    {
+        $contact = User::sanitizePersonName($validated['contact_person'] ?? '');
+        if ($contact !== '') {
+            $parts = preg_split('/\s+/', $contact, 2) ?: [];
+            $fname = $parts[0] ?? 'Client';
+            $lname = User::usableLastName($parts[1] ?? '', $validated['company'] ?? $existing?->mname);
+
+            return [$fname, $lname];
+        }
+
+        $fname = trim((string) ($validated['fname'] ?? $existing?->fname ?? ''));
+        $lname = User::usableLastName(
+            $validated['lname'] ?? $existing?->lname,
+            $validated['company'] ?? $existing?->mname
+        );
+
+        if ($fname === '') {
+            $fname = 'Client';
+        }
+
+        return [$fname, $lname];
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function clientProfileAttributes(array $validated): array
+    {
+        $keys = [
+            'industry',
+            'tax_classification',
+            'tin_number',
+            'other_numbers',
+            'currency',
+            'workdrive_folder_url',
+            'workdrive_folder_id',
+            'client_classification',
+            'client_type',
+            'contact_person',
+            'website',
+            'ownership',
+            'billing_in_charge',
+            'exchange_rate',
+            'address_city',
+            'address_province',
+            'address_region',
+            'address_zip',
+            'address_country',
+            'shipping_street',
+            'shipping_city',
+            'shipping_province',
+            'shipping_region',
+            'shipping_zip',
+            'shipping_country',
+            'contact_information',
+        ];
+
+        $attrs = [];
+        foreach ($keys as $key) {
+            if (array_key_exists($key, $validated)) {
+                $attrs[$key] = $validated[$key];
+            }
+        }
+
+        if (!array_key_exists('currency', $attrs) || $attrs['currency'] === null || $attrs['currency'] === '') {
+            $attrs['currency'] = 'PHP';
+        }
+
+        if (!array_key_exists('exchange_rate', $attrs) || $attrs['exchange_rate'] === null || $attrs['exchange_rate'] === '') {
+            $attrs['exchange_rate'] = 1;
+        }
+
+        if (array_key_exists('contact_information', $attrs)) {
+            $attrs['contact_information'] = $this->sanitizeContactInformation($attrs['contact_information']);
+        }
+
+        return $attrs;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function sanitizeContactInformation(mixed $value): array
+    {
+        $source = is_array($value) ? $value : [];
+        $block = function (mixed $row): array {
+            $row = is_array($row) ? $row : [];
+            $text = fn (string $key, int $limit = 255) => mb_substr(trim((string) ($row[$key] ?? '')), 0, $limit);
+
+            return [
+                'enabled' => filter_var($row['enabled'] ?? false, FILTER_VALIDATE_BOOLEAN),
+                'person' => $text('person'),
+                'designation' => $text('designation'),
+                'email' => $text('email'),
+                'phone' => $text('phone', 50),
+                'mobile' => $text('mobile', 50),
+                'attention' => $text('attention'),
+                'instructions' => $text('instructions', 2000),
+                'address' => $text('address', 2000),
+                'other' => $text('other', 2000),
+            ];
+        };
+        $signatories = [];
+        foreach (array_slice(is_array($source['signatories'] ?? null) ? $source['signatories'] : [], 0, 20) as $row) {
+            $row = is_array($row) ? $row : [];
+            $text = fn (string $key, int $limit = 255) => mb_substr(trim((string) ($row[$key] ?? '')), 0, $limit);
+            $signatories[] = [
+                'person' => $text('person'),
+                'designation' => $text('designation'),
+                'email' => $text('email'),
+                'phone' => $text('phone', 50),
+                'mobile' => $text('mobile', 50),
+                'other' => $text('other', 2000),
+            ];
+        }
+        if ($signatories === []) {
+            $signatories = [[
+                'person' => '',
+                'designation' => '',
+                'email' => '',
+                'phone' => '',
+                'mobile' => '',
+                'other' => '',
+            ], [
+                'person' => '',
+                'designation' => '',
+                'email' => '',
+                'phone' => '',
+                'mobile' => '',
+                'other' => '',
+            ]];
+        }
+
+        $billing = $block($source['billing'] ?? null);
+        $collection = $block($source['collection'] ?? null);
+
+        $hasBlockContent = static function (array $row): bool {
+            foreach (['person', 'designation', 'email', 'phone', 'mobile', 'attention', 'instructions', 'address', 'other'] as $key) {
+                if (trim((string) ($row[$key] ?? '')) !== '') {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        if (! $hasBlockContent($billing) && $hasBlockContent($collection)) {
+            $billing = $collection;
+        }
+        if (($billing['enabled'] ?? false) || ($collection['enabled'] ?? false)) {
+            $billing['enabled'] = true;
+        }
+        $collection = $billing;
+
+        return [
+            'billing' => $billing,
+            'collection' => $collection,
+            'technical' => $block($source['technical'] ?? null),
+            'signatoriesEnabled' => filter_var($source['signatoriesEnabled'] ?? false, FILTER_VALIDATE_BOOLEAN),
+            'signatories' => $signatories,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function clientProfilePayload(User $customer): array
+    {
+        return [
+            'industry' => $customer->industry,
+            'tax_classification' => $customer->tax_classification,
+            'tin_number' => $customer->tin_number,
+            'other_numbers' => $customer->other_numbers,
+            'currency' => $customer->currency ?: 'PHP',
+            'workdrive_folder_url' => $customer->workdrive_folder_url,
+            'workdrive_folder_id' => $customer->workdrive_folder_id,
+            'client_classification' => $customer->client_classification,
+            'client_type' => $customer->client_type,
+            'contact_person' => User::sanitizePersonName($customer->contact_person) ?: $customer->full_name,
+            'website' => $customer->website,
+            'ownership' => $customer->ownership,
+            'billing_in_charge' => $customer->billing_in_charge,
+            'exchange_rate' => $customer->exchange_rate,
+            'shipping_street' => $customer->shipping_street,
+            'shipping_city' => $customer->shipping_city,
+            'shipping_province' => $customer->shipping_province,
+            'shipping_region' => $customer->shipping_region,
+            'shipping_zip' => $customer->shipping_zip,
+            'shipping_country' => $customer->shipping_country,
+            'bir_certificate' => $customer->bir_certificate,
+            'business_permit' => $customer->business_permit,
+            'sec_dti_registration' => $customer->sec_dti_registration,
+            'valid_id_signatories' => $customer->valid_id_signatories,
+            'gen_info_sheet' => $customer->gen_info_sheet,
+            'contact_information' => $customer->contact_information,
+            'bir_certificate_url' => StorageUrl::publicAsset($customer->bir_certificate),
+            'business_permit_url' => StorageUrl::publicAsset($customer->business_permit),
+            'sec_dti_registration_url' => StorageUrl::publicAsset($customer->sec_dti_registration),
+            'valid_id_signatories_url' => StorageUrl::publicAsset($customer->valid_id_signatories),
+            'gen_info_sheet_url' => StorageUrl::publicAsset($customer->gen_info_sheet),
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function storeClientDocuments(Request $request, ?User $existing = null): array
+    {
+        $fields = [
+            'bir_certificate',
+            'business_permit',
+            'sec_dti_registration',
+            'valid_id_signatories',
+            'gen_info_sheet',
+        ];
+
+        $paths = [];
+        foreach ($fields as $field) {
+            if (!$request->hasFile($field)) {
+                continue;
+            }
+
+            $previous = $existing?->{$field};
+            if ($previous && Storage::disk('public')->exists($previous)) {
+                Storage::disk('public')->delete($previous);
+            }
+
+            $paths[$field] = $request->file($field)->store('client-documents', 'public');
+        }
+
+        return $paths;
+    }
+}
