@@ -86,9 +86,11 @@ class PublicPageController extends Controller
                 'transition_in_value'  => $transitionInValue,
                 'transition_out_value' => $transitionOutValue,
                 'banners' => $page->album->banners->map(function ($banner) {
-                    $mediaType = preg_match('/\.(mp4|webm|ogg|mov|m4v)(\?.*)?$/i', (string) $banner->image_path)
-                        ? 'video'
-                        : 'image';
+                    $mediaType = in_array($banner->media_type, ['image', 'video'], true)
+                        ? $banner->media_type
+                        : (preg_match('/\.(mp4|webm|ogg|mov|m4v)(\?.*)?$/i', (string) $banner->image_path)
+                            ? 'video'
+                            : 'image');
 
                     return [
                         'id'          => $banner->id,

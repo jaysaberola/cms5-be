@@ -200,6 +200,16 @@ class AlbumController extends Controller
 
     private function syncBanners(Album $album, array $banners, Request $request)
     {
+        if ($banners === [] && $album->banners()->exists()) {
+            $fileBag = $request->allFiles()['banners'] ?? null;
+            $hasUploads = is_array($fileBag) && count($fileBag) > 0;
+
+            if (! $hasUploads) {
+                // Multipart parse failed or empty payload — do not wipe existing slides.
+                return;
+            }
+        }
+
         $existingIds = collect($banners)->pluck('id')->filter()->values();
         $removedBanners = Banner::where('album_id', $album->id)
             ->whereNotIn('id', $existingIds)
@@ -214,6 +224,11 @@ class AlbumController extends Controller
         }
 
         foreach ($banners as $index => $data) {
+            $mediaType = $data['media_type'] ?? null;
+            if (! in_array($mediaType, ['image', 'video'], true)) {
+                $mediaType = null;
+            }
+
             $attributes = [
                 'title' => $data['title'] ?? null,
                 'description' => $data['description'] ?? null,
@@ -221,6 +236,7 @@ class AlbumController extends Controller
                 'button_text' => $data['button_text'] ?? null,
                 'url' => $data['url'] ?? null,
                 'order' => $data['order'] ?? $index,
+                'media_type' => $mediaType,
                 'user_id' => auth()->id(),
             ];
 

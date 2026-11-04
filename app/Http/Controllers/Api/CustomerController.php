@@ -146,7 +146,7 @@ class CustomerController extends Controller
                 'services.*' => ['required', 'string', 'max:255'],
                 'addons' => ['nullable', 'array'],
                 'addons.*' => ['string', 'max:255'],
-                'avatar' => ['nullable', 'image', 'mimes:jpeg,png,jpg,webp', 'max:2048'],
+                'avatar' => ['nullable', 'file', 'max:5120'],
             ]
         ));
 
@@ -469,7 +469,7 @@ class CustomerController extends Controller
         $validated = $request->validate(array_merge(
             $this->clientProfileRules(false, $customer->id),
             [
-                'avatar' => ['nullable', 'image', 'mimes:jpeg,png,jpg,webp', 'max:2048'],
+                'avatar' => ['nullable', 'file', 'max:5120'],
                 'is_active' => ['sometimes', 'boolean'],
                 'services' => ['nullable', 'array'],
                 'services.*' => ['string', 'max:255'],

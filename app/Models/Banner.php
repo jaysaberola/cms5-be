@@ -19,6 +19,7 @@ class Banner extends Model implements AuditableContract
         'description',
         'alt',
         'image_path',
+        'media_type',
         'button_text',
         'url',
         'order',

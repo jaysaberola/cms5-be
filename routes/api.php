@@ -51,6 +51,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // albums
     Route::apiResource('albums', AlbumController::class);
+    Route::post('/albums/{album}/save', [AlbumController::class, 'update']);
     Route::post('/albums/restore', [AlbumController::class, 'restore']);
     Route::post('/albums/{id}/restore', [AlbumController::class, 'restoreById']);
 
