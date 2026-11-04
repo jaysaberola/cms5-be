@@ -138,7 +138,7 @@ class AlbumController extends Controller
         $rules = [];
 
         foreach (array_keys($this->resolveBannerPayload($request)) as $index) {
-            if (! $request->hasFile("banners.$index.image")) {
+            if (! $this->bannerUploadAt($request, (int) $index) instanceof UploadedFile) {
                 continue;
             }
 
@@ -178,9 +178,14 @@ class AlbumController extends Controller
 
     private function bannerUploadAt(Request $request, int $index): ?UploadedFile
     {
-        $file = $request->file("banners.$index.image");
-        if ($file instanceof UploadedFile) {
-            return $file;
+        foreach ([
+            "banners.$index.image",
+            "banners.$index.image_file",
+        ] as $key) {
+            $file = $request->file($key);
+            if ($file instanceof UploadedFile) {
+                return $file;
+            }
         }
 
         $nested = $request->file('banners');
@@ -189,13 +194,18 @@ class AlbumController extends Controller
         }
 
         $row = $nested[$index];
-        if (! is_array($row) || ! isset($row['image'])) {
+        if (! is_array($row)) {
             return null;
         }
 
-        $candidate = $row['image'];
+        foreach (['image', 'image_file'] as $field) {
+            $candidate = $row[$field] ?? null;
+            if ($candidate instanceof UploadedFile) {
+                return $candidate;
+            }
+        }
 
-        return $candidate instanceof UploadedFile ? $candidate : null;
+        return null;
     }
 
     private function syncBanners(Album $album, array $banners, Request $request)
