@@ -41,6 +41,8 @@ class PageController extends Controller
             $validated['grapes_js'] = $parts['grapes_js'];
         }
 
+        $this->syncGrapesFieldsFromContents($validated);
+
         $page = Page::create([
             'name'             => $validated['name'],
             'label'            => $validated['label'] ?? null,
@@ -217,11 +219,38 @@ class PageController extends Controller
             $validated['grapes_js'] = $parts['grapes_js'];
         }
 
+        $this->syncGrapesFieldsFromContents($validated, $page);
+
         $page->update($validated);
 
         return response()->json([
             'message' => 'Page updated successfully',
         ]);
+    }
+
+    /**
+     * Keep grapes_html/css/js in sync with the canonical contents blob (visual builder export).
+     */
+    private function syncGrapesFieldsFromContents(array &$validated, ?Page $page = null): void
+    {
+        if (! array_key_exists('contents', $validated)) {
+            return;
+        }
+
+        $contents = $validated['contents'];
+        if (! is_string($contents) || trim($contents) === '') {
+            return;
+        }
+
+        $contentType = $validated['content_type'] ?? $page?->content_type ?? null;
+        if ($contentType !== 'grapes') {
+            return;
+        }
+
+        $parts = GrapesParser::parse($contents);
+        $validated['grapes_html'] = $parts['grapes_html'];
+        $validated['grapes_css'] = $parts['grapes_css'];
+        $validated['grapes_js'] = $parts['grapes_js'];
     }
 
     private function uniqueSlug(string $base, ?int $ignoreId = null): string
