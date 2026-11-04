@@ -17,7 +17,11 @@ class StorageAssetUrl
         }
 
         $normalized = ltrim($normalized, '/');
+        $normalized = preg_replace('#^storage/#', '', $normalized);
 
-        return '/storage/' . $normalized;
+        $relative = '/storage/' . $normalized;
+        $base = rtrim((string) config('app.url'), '/');
+
+        return $base !== '' ? $base . $relative : $relative;
     }
 }
