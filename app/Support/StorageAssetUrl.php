@@ -19,7 +19,7 @@ class StorageAssetUrl
         $normalized = ltrim($normalized, '/');
         $normalized = preg_replace('#^storage/#', '', $normalized);
 
-        $relative = '/storage/' . $normalized;
+        $relative = '/api/public-disk/' . $normalized;
         $base = rtrim((string) config('app.url'), '/');
 
         return $base !== '' ? $base . $relative : $relative;

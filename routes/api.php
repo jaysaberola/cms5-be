@@ -24,6 +24,7 @@ use App\Http\Controllers\Api\PermissionMatrixController;
 use App\Http\Controllers\Api\DomainLookupController;
 use App\Http\Controllers\Api\AccountController;
 use App\Http\Controllers\Api\CmsHelpProgressController;
+use App\Http\Controllers\Api\PublicStorageController;
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::middleware('auth:sanctum')->group(function () {
@@ -163,6 +164,10 @@ Route::middleware('auth:sanctum')->group(function () {
     });
     }); // cms.portal
 }); // auth:sanctum
+
+// Public disk files (banners, logos, etc.) — no symlink required
+Route::get('/public-disk/{path}', [PublicStorageController::class, 'show'])
+    ->where('path', '.*');
 
 //public
 Route::get('/public/pages/{slug}', [PublicPageController::class, 'show']);
