@@ -107,7 +107,7 @@ class AlbumController extends Controller
                 'user_id' => auth()->id(),
             ]);
 
-            $this->syncBanners($album, $request->banners ?? []);
+            $this->syncBanners($album, $this->resolveBannerPayload($request), $request);
 
             return response()->json($album->load('banners'), 201);
         });
@@ -118,9 +118,16 @@ class AlbumController extends Controller
         return DB::transaction(function () use ($request, $album) {
             $this->validateBannerUploads($request);
 
-            $album->update($request->all());
+            $album->update($request->only([
+                'name',
+                'transition_in',
+                'transition_out',
+                'transition',
+                'banner_type',
+                'type',
+            ]));
 
-            $this->syncBanners($album, $request->banners ?? []);
+            $this->syncBanners($album, $this->resolveBannerPayload($request), $request);
 
             return response()->json($album->load('banners'));
         });
@@ -128,14 +135,14 @@ class AlbumController extends Controller
 
     private function validateBannerUploads(Request $request): void
     {
-        $banners = $request->input('banners', []);
-        if (! is_array($banners)) {
-            return;
-        }
-
         $rules = [];
-        foreach (array_keys($banners) as $index) {
-            $rules["banners.$index.image"] = ['nullable', 'file', 'max:10240'];
+
+        foreach (array_keys($this->resolveBannerPayload($request)) as $index) {
+            if (! $request->hasFile("banners.$index.image")) {
+                continue;
+            }
+
+            $rules["banners.$index.image"] = ['required', 'file', 'max:10240'];
         }
 
         if ($rules !== []) {
@@ -143,7 +150,55 @@ class AlbumController extends Controller
         }
     }
 
-    private function syncBanners(Album $album, array $banners)
+    /**
+     * Merge text fields and file upload indices (multipart can omit empty rows).
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function resolveBannerPayload(Request $request): array
+    {
+        $banners = $request->input('banners', []);
+        if (! is_array($banners)) {
+            $banners = [];
+        }
+
+        $files = $request->file('banners', []);
+        if (is_array($files)) {
+            foreach ($files as $index => $row) {
+                if (! isset($banners[$index]) || ! is_array($banners[$index])) {
+                    $banners[$index] = [];
+                }
+            }
+        }
+
+        ksort($banners);
+
+        return $banners;
+    }
+
+    private function bannerUploadAt(Request $request, int $index): ?UploadedFile
+    {
+        $file = $request->file("banners.$index.image");
+        if ($file instanceof UploadedFile) {
+            return $file;
+        }
+
+        $nested = $request->file('banners');
+        if (! is_array($nested) || ! isset($nested[$index])) {
+            return null;
+        }
+
+        $row = $nested[$index];
+        if (! is_array($row) || ! isset($row['image'])) {
+            return null;
+        }
+
+        $candidate = $row['image'];
+
+        return $candidate instanceof UploadedFile ? $candidate : null;
+    }
+
+    private function syncBanners(Album $album, array $banners, Request $request)
     {
         $existingIds = collect($banners)->pluck('id')->filter()->values();
         $removedBanners = Banner::where('album_id', $album->id)
@@ -159,24 +214,29 @@ class AlbumController extends Controller
         }
 
         foreach ($banners as $index => $data) {
+            $attributes = [
+                'title' => $data['title'] ?? null,
+                'description' => $data['description'] ?? null,
+                'alt' => $data['alt'] ?? null,
+                'button_text' => $data['button_text'] ?? null,
+                'url' => $data['url'] ?? null,
+                'order' => $data['order'] ?? $index,
+                'user_id' => auth()->id(),
+            ];
 
-            $banner = Banner::updateOrCreate(
-                [
-                    'id' => $data['id'] ?? null,
-                    'album_id' => $album->id,
-                ],
-                [
-                    'title' => $data['title'] ?? null,
-                    'description' => $data['description'] ?? null,
-                    'alt' => $data['alt'] ?? null,
-                    'button_text' => $data['button_text'] ?? null,
-                    'url' => $data['url'] ?? null,
-                    'order' => $data['order'] ?? $index,
-                    'user_id' => auth()->id(),
-                ]
-            );
+            $bannerId = $data['id'] ?? null;
+            if (! empty($bannerId)) {
+                $banner = Banner::where('album_id', $album->id)->where('id', $bannerId)->first();
+                if ($banner) {
+                    $banner->update($attributes);
+                } else {
+                    $banner = Banner::create(array_merge($attributes, ['album_id' => $album->id]));
+                }
+            } else {
+                $banner = Banner::create(array_merge($attributes, ['album_id' => $album->id]));
+            }
 
-            $image = request()->file("banners.$index.image");
+            $image = $this->bannerUploadAt($request, (int) $index);
 
             if ($image instanceof UploadedFile) {
                 if ($banner->image_path && Storage::disk('public')->exists($banner->image_path)) {

@@ -70,7 +70,7 @@ class ServiceController extends Controller
             'status' => ['nullable', 'in:active,inactive'],
             'is_active' => ['nullable', 'boolean'],
             'category_id' => ['nullable', 'integer', 'exists:service_categories,id'],
-            'image' => ['nullable', 'image', 'max:4096'],
+            'image' => ['nullable', 'file', 'max:10240'],
         ]);
 
         [$status, $isActive] = $this->normalizeStatus(
@@ -119,7 +119,7 @@ class ServiceController extends Controller
             'status' => ['nullable', 'in:active,inactive'],
             'is_active' => ['nullable', 'boolean'],
             'category_id' => ['nullable', 'integer', 'exists:service_categories,id'],
-            'image' => ['nullable', 'image', 'max:4096'],
+            'image' => ['nullable', 'file', 'max:10240'],
         ]);
 
         $updates = [];

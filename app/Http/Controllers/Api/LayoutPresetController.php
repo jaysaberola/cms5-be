@@ -51,7 +51,7 @@ class LayoutPresetController extends Controller
             'category' => 'nullable|string|max:255',
             'content' => 'required|string',
             'is_active' => 'boolean',
-            'thumbnail' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:2048',
+            'thumbnail' => 'nullable|file|max:5120',
         ]);
 
         // Handle thumbnail upload
@@ -75,7 +75,7 @@ class LayoutPresetController extends Controller
             'category' => 'nullable|string|max:255',
             'content' => 'required|string',
             'is_active' => 'boolean',
-            'thumbnail' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:2048',
+            'thumbnail' => 'nullable|file|max:5120',
         ]);
 
         if ($request->hasFile('thumbnail')) {

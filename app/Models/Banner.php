@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\StorageAssetUrl;
 use OwenIt\Auditing\Auditable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
@@ -23,6 +24,15 @@ class Banner extends Model implements AuditableContract
         'order',
         'user_id',
     ];
+
+    protected $appends = [
+        'image_url',
+    ];
+
+    public function getImageUrlAttribute(): ?string
+    {
+        return StorageAssetUrl::publicDisk($this->image_path);
+    }
 
     /* =====================
      | Relationships

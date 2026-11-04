@@ -70,8 +70,8 @@ class WebsiteSettingController extends Controller
             'company_name' => 'required|string|max:150',
             'website_name' => 'required|string|max:150',
             'copyright' => 'required|string|max:150',
-            'company_logo' => 'nullable|image',
-            'website_favicon' => 'nullable|image',
+            'company_logo' => 'nullable|file|max:5120',
+            'website_favicon' => 'nullable|file|max:5120',
             'nav_alignment' => 'nullable|in:left,center,right',
         ]);
 

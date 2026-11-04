@@ -67,7 +67,7 @@ class AccountController extends Controller
             'address_region' => 'nullable|string|max:120',
             'address_zip' => 'nullable|string|max:30',
             'address_country' => 'nullable|string|max:120',
-            'avatar' => 'nullable|image|mimes:jpeg,png,jpg|max:1024',
+            'avatar' => 'nullable|file|max:5120',
         ]);
 
         $user = $request->user();

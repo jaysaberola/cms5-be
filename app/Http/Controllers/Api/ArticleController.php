@@ -116,8 +116,8 @@ class ArticleController extends Controller
             'meta_keyword' => 'nullable|string',
             'meta_description' => 'nullable|string',
 
-            'banner' => 'nullable|image|max:2048',
-            'thumbnail' => 'nullable|image|max:1024',
+            'banner' => 'nullable|file|max:10240',
+            'thumbnail' => 'nullable|file|max:10240',
         ]);
 
         // 🔹 Upload banner
@@ -179,8 +179,8 @@ class ArticleController extends Controller
             'meta_keyword' => 'nullable|string',
             'meta_description' => 'nullable|string',
 
-            'banner' => 'nullable|image|max:2048',
-            'thumbnail' => 'nullable|image|max:1024',
+            'banner' => 'nullable|file|max:10240',
+            'thumbnail' => 'nullable|file|max:10240',
         ]);
 
         // 🔹 Replace banner if uploaded
