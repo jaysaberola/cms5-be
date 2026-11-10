@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\Page;
 use App\Models\Page;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
+use Illuminate\Database\QueryException;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\PageResource;
 use App\Services\GrapesParser;
@@ -189,6 +190,10 @@ class PageController extends Controller
     {
         $page = Page::findOrFail($id);
 
+        if ($request->exists('album_id') && $request->input('album_id') === '') {
+            $request->merge(['album_id' => null]);
+        }
+
         $validated = $request->validate([
             'name' => 'sometimes|required|string',
             'label' => 'sometimes|nullable|string',
@@ -199,7 +204,7 @@ class PageController extends Controller
             'grapes_css' => 'sometimes|nullable|string',
             'grapes_js' => 'sometimes|nullable|string',
             'grapes_payload' => 'sometimes|nullable|string',
-            'status' => 'sometimes|required|in:published,private',
+            'status' => 'sometimes|required|in:published,private,draft',
             'meta_title' => 'sometimes|nullable|string',
             'meta_description' => 'sometimes|nullable|string',
             'meta_keyword' => 'sometimes|nullable|string',
@@ -221,7 +226,22 @@ class PageController extends Controller
 
         $this->syncGrapesFieldsFromContents($validated, $page);
 
-        $page->update($validated);
+        try {
+            $page->update($validated);
+        } catch (QueryException $e) {
+            $sqlMessage = $e->getMessage();
+            if (str_contains($sqlMessage, 'Data too long') || str_contains($sqlMessage, '1406')) {
+                return response()->json([
+                    'message' => 'Page content is too large to save. Try simplifying the Contact template styles, then save again.',
+                ], 422);
+            }
+
+            report($e);
+
+            return response()->json([
+                'message' => 'Failed to update page. Please try again.',
+            ], 500);
+        }
 
         return response()->json([
             'message' => 'Page updated successfully',
