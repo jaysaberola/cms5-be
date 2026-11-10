@@ -173,7 +173,9 @@ class PageController extends Controller
             'id' => $page->id,
             'name' => $page->name,
             'label' => $page->label,
-            'album_id' => $page->album_id, // ✅ ADD THIS
+            'slug' => $page->slug,
+            'url' => $page->slug ? url($page->slug) : null,
+            'album_id' => $page->album_id,
             'contents' => $page->contents,
             'content_type' => $page->content_type,
             'grapes_html' => $page->grapes_html,
@@ -183,6 +185,7 @@ class PageController extends Controller
             'meta_title' => $page->meta_title,
             'meta_description' => $page->meta_description,
             'meta_keyword' => $page->meta_keyword,
+            'contact_form_recipient' => $page->contact_form_recipient,
         ]);
     }
 
@@ -208,6 +211,7 @@ class PageController extends Controller
             'meta_title' => 'sometimes|nullable|string',
             'meta_description' => 'sometimes|nullable|string',
             'meta_keyword' => 'sometimes|nullable|string',
+            'contact_form_recipient' => 'sometimes|nullable|email|max:255',
         ]);
 
         if (array_key_exists('name', $validated)) {

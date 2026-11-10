@@ -20,7 +20,18 @@ class ContactMessageMail extends Mailable
 
     public function build()
     {
-        return $this->subject('New Inquiry Received')
+        $customerEmail = trim((string) ($this->data['email'] ?? ''));
+        $customerName = trim(
+            trim((string) ($this->data['first_name'] ?? '')) . ' ' . trim((string) ($this->data['last_name'] ?? ''))
+        );
+
+        $mailable = $this->subject('New Inquiry Received')
             ->view('emails.contact-message');
+
+        if ($customerEmail !== '' && filter_var($customerEmail, FILTER_VALIDATE_EMAIL)) {
+            $mailable->replyTo($customerEmail, $customerName !== '' ? $customerName : $customerEmail);
+        }
+
+        return $mailable;
     }
 }

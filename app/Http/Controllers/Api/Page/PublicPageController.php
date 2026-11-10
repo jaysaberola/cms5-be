@@ -12,6 +12,7 @@ use Illuminate\Http\Request;
 use App\Models\ArticleCategory;
 use App\Mail\ContactMessageMail;
 use App\Models\ContactInquiry;
+use App\Models\Setting;
 use App\Services\CommerceStaffNotifier;
 use App\Http\Controllers\Controller;
 use App\Support\RecaptchaVerifier;
@@ -330,7 +331,20 @@ class PublicPageController extends Controller
         );
 
         try {
-            Mail::to(config('mail.from.address'))
+            $pageRecipient = trim((string) (
+                Page::query()
+                    ->whereIn('slug', ['contact-us', 'contact'])
+                    ->whereNotNull('contact_form_recipient')
+                    ->value('contact_form_recipient')
+                ?: ''
+            ));
+            $settingRecipient = trim((string) (Setting::query()->value('email') ?: ''));
+            $recipient = $pageRecipient !== '' ? $pageRecipient : $settingRecipient;
+            if ($recipient === '' || ! filter_var($recipient, FILTER_VALIDATE_EMAIL)) {
+                $recipient = (string) config('mail.from.address');
+            }
+
+            Mail::to($recipient)
                 ->send(new ContactMessageMail($data));
         } catch (\Throwable) {
             // Inquiry is stored for Customer Care even if outbound mail fails.

@@ -27,6 +27,7 @@ class Page extends Model implements AuditableContract
         'meta_title',
         'meta_keyword',
         'meta_description',
+        'contact_form_recipient',
         'user_id',
         'template',
         'grapes_html',

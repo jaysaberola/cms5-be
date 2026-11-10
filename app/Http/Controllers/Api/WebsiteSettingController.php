@@ -131,6 +131,22 @@ class WebsiteSettingController extends Controller
     }
 
     /* =========================
+       CONTACT FORM RECIPIENT
+    ========================= */
+    public function updateContactFormRecipient(Request $request)
+    {
+        $request->validate([
+            'email' => 'required|email|max:255',
+        ]);
+
+        $this->setting()->update([
+            'email' => $request->input('email'),
+        ]);
+
+        return response()->json(['message' => 'Contact form recipient updated']);
+    }
+
+    /* =========================
        DATA PRIVACY TAB
     ========================= */
 

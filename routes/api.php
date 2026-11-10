@@ -115,6 +115,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::post('/website-settings/website', [WebsiteSettingController::class, 'updateWebsite']);
     Route::post('/website-settings/contact', [WebsiteSettingController::class, 'updateContact']);
+    Route::post('/website-settings/contact-form-recipient', [WebsiteSettingController::class, 'updateContactFormRecipient']);
     Route::post('/website-settings/privacy', [WebsiteSettingController::class, 'updatePrivacy']);
 
     Route::get('/website-settings/social', [WebsiteSettingController::class, 'getSocials']);
